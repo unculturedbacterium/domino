@@ -1,8 +1,0 @@
-implementation,traits,output,runtime_s,peak_rss_increment_mib
-reference_baseline,1,retained,5.598,150.0
-Domino,1,retained,4.944,154.5
-reference_baseline,4,retained,11.374,178.0
-Domino,4,retained,5.276,167.0
-reference_baseline,20,streamed,44.531,315.9
-Domino_cold_cache,20,streamed,6.745,204.0
-Domino_cache_hit,20,streamed,3.750,170.4
