@@ -230,6 +230,38 @@ domino.run_gwas(
     out="results/trait_1",
 )
 ```
+## BLUP prediction
+
+Domino can also fit a full-genome additive GRM model and write one additive
+BLUP per animal and quantitative trait:
+
+```bash
+domino-blup \
+  --bfile data/study \
+  --pheno data/phenotypes.tsv \
+  --id-column iid \
+  --traits trait_1,trait_2 \
+  --covariates PC1,PC2,PC3 \
+  --categorical-covariates sex,batch \
+  --out results/study
+```
+
+The output separates the fixed prediction, additive BLUP, total genetic value,
+fitted value, and residual. See [docs/BLUP.md](docs/BLUP.md) for the Python API
+and for calculating additive and dominance BLUPs when both GRMs and their
+variance components are available.
+
+For streamed library output, set `return_results=False` and provide `out`:
+
+```python
+domino.run_gwas(
+    "data/study",
+    data[["trait_1"]],
+    covar=data[["sex", "batch", "PC1", "PC2", "PC3"]],
+    return_results=False,
+    out="results/trait_1",
+)
+```
 
 ## Multiple traits
 
