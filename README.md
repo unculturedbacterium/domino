@@ -410,6 +410,8 @@ choices that may differ from requested ceilings after resource planning.
 
 ## Validation and reproducibility
 
+# Full Validation Report can be found here: [docs/VALIDATION_REPORT.md](docs/VALIDATION_REPORT.md)
+
 Run the local checks from the repository root:
 
 ```bash
