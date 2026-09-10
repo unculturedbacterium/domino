@@ -1,5 +1,9 @@
 # Domino
 
+[![Domino tests](https://github.com/unculturedbacterium/Domino/actions/workflows/tests.yml/badge.svg)](https://github.com/unculturedbacterium/Domino/actions/workflows/tests.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
 Domino is a Python pipeline for additive and dominance genome-wide association
 analysis of quantitative traits. It reads PLINK 1 binary genotype files,
 constructs additive leave-one-chromosome-out (LOCO) relationship models,
@@ -33,6 +37,9 @@ print(domino.__version__)
 - Optional CuPy projection offload to one or more NVIDIA GPUs.
 - Signed `d/a` estimates and inheritance-mode classifications.
 - Runtime, peak-RSS, cache, approximation, and resource-plan sidecars.
+- Notebook-friendly helpers for PLINK/QC checks, phenotype alignment, GRM
+  diagnostics, heritability tables, GWAS summaries, figures, and run
+  manifests.
 
 Domino does not require PLINK, GCTA, R, or a project-specific compiled
 extension for association testing. PLINK remains useful for upstream genotype
@@ -122,6 +129,15 @@ use `--bfile data/study`. Sample IDs are taken from the IID column, which is
 the second column of the `.fam` file. IIDs must identify samples unambiguously.
 Variant order, chromosome, identifier, base-pair position, and alleles are
 read from the `.bim` file.
+
+Python helpers are available for notebook and scripted QC:
+
+```python
+import domino
+
+domino.validate_plink_files("data/study")
+domino.summarize_plink("data/study", max_variants=100_000)
+```
 
 ### Phenotypes and covariates
 
@@ -219,17 +235,68 @@ results = domino.run_gwas(
 )
 ```
 
-For streamed library output, set `return_results=False` and provide `out`:
+Notebook-style input alignment can be done before a full run:
 
 ```python
-domino.run_gwas(
+aligned = domino.align_phenotype_to_fam(
+    data.reset_index(),
     "data/study",
-    data[["trait_1"]],
-    covar=data[["sex", "batch", "PC1", "PC2", "PC3"]],
-    return_results=False,
-    out="results/trait_1",
+    traits=["trait_1"],
+    covariates=data.reset_index()[["iid", "sex", "batch", "PC1", "PC2", "PC3"]],
+    categorical_covariates=["sex", "batch"],
+    require_complete=True,
+)
+
+phenotype = aligned["phenotype"]
+covariates = aligned["covariates"]
+```
+
+The selected tutorial functionality from the example notebooks is available
+through stable package modules:
+
+- `domino.qc`: PLINK validation, genotype summaries, phenotype/FAM alignment,
+  covariate encoding, GCTA binary GRM reading, and trait-prefix selection.
+- `domino.relationships`: GRM diagnostics, LOCO GRM summaries, eigensystem
+  diagnostics, and profile-REML or SCORE heritability tables.
+- `domino.reporting`: genomic inflation, Bonferroni thresholds, top-hit
+  tables, dominance-class counts, and cross-method result agreement.
+- `domino.plotting`: QQ plots, Manhattan plots, additive-versus-dominance
+  scatter plots, and runtime/memory benchmark plots.
+- `domino.reproducibility`: environment capture, JSON run manifests, Git
+  revision capture, and public API tables.
+
+Example result summaries and figures:
+
+```python
+summary = domino.summarize_gwas_results(
+    results,
+    tests=["additive", "dom_joint", "add_vs_add_dom"],
+)
+top = domino.top_hits(results, test="dom_joint", n=20)
+
+ax = domino.qq_plot(results, test="additive", trait="trait_1")
+ax.figure.savefig("results/trait_1.additive.qq.png", dpi=200, bbox_inches="tight")
+
+ax = domino.manhattan_plot(results, test="dom_joint", trait="trait_1")
+ax.figure.savefig("results/trait_1.dominance.manhattan.png", dpi=200, bbox_inches="tight")
+```
+
+The plotting helpers require the optional plotting dependency:
+
+```bash
+python -m pip install ".[plot]"
+```
+
+For methods sections and reproducible reports:
+
+```python
+domino.write_manifest(
+    "results/trait_1.manifest.json",
+    command="domino --bfile data/study --pheno data/phenotypes.tsv ...",
+    inputs={"bfile": "data/study", "phenotype": "data/phenotypes.tsv"},
 )
 ```
+
 ## BLUP prediction
 
 Domino can also fit a full-genome additive GRM model and write one additive
@@ -442,8 +509,6 @@ choices that may differ from requested ceilings after resource planning.
 
 ## Validation and reproducibility
 
-### Full Validation Report can be found here: [docs/VALIDATION_REPORT.md](docs/VALIDATION_REPORT.md)
-
 Run the local checks from the repository root:
 
 ```bash
@@ -462,6 +527,12 @@ most beneficial as trait count increased. See
 
 Private genotype and phenotype files are not included. The synthetic example
 and tests are generated locally from fixed random seeds.
+
+The manuscript validation bundle is in [paper/](paper/README.md). It contains
+fixed-seed analysis scripts, aggregate calibration and power results,
+runtime/memory measurements, publication figures in PNG and PDF formats,
+figure captions, and a paper-facing results draft. Individual-level real data,
+GRM caches, and chromosome-level association files remain excluded.
 
 ## Scope and limitations
 
@@ -492,6 +563,7 @@ tests/                   unit and integration tests
 examples/quickstart.py   self-contained synthetic run
 docs/                    methods, I/O, covariates, scaling, validation
 benchmarks/              reproducible current-version benchmark driver
+paper/                   manuscript tests, aggregate results, and figures
 .github/workflows/       continuous integration
 ```
 
