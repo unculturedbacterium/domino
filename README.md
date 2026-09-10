@@ -1,9 +1,5 @@
 # Domino
 
-[![Domino tests](https://github.com/unculturedbacterium/Domino/actions/workflows/tests.yml/badge.svg)](https://github.com/unculturedbacterium/Domino/actions/workflows/tests.yml)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
-
 Domino is a Python pipeline for additive and dominance genome-wide association
 analysis of quantitative traits. It reads PLINK 1 binary genotype files,
 constructs additive leave-one-chromosome-out (LOCO) relationship models,
