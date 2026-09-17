@@ -39,14 +39,60 @@ def classify_da(da, thresholds=DEFAULT_THRESHOLDS):
     return out
 
 
+def fieller_ratio_interval(
+    beta_add_raw,
+    beta_dom_raw,
+    variance_add_raw,
+    variance_dom_raw,
+    covariance_add_dom_raw=0.0,
+    z=1.959963984540054,
+):
+    """Fieller confidence interval for the signed ratio ``d/a``.
+
+    Unbounded or undefined intervals are represented by missing endpoints and
+    ``bounded=False``. This is intentional: a finite point ratio should not be
+    interpreted when the additive denominator is insufficiently separated
+    from zero.
+    """
+    a, d, va, vd, cov = np.broadcast_arrays(
+        np.asarray(beta_add_raw, dtype=np.float64),
+        np.asarray(beta_dom_raw, dtype=np.float64),
+        np.asarray(variance_add_raw, dtype=np.float64),
+        np.asarray(variance_dom_raw, dtype=np.float64),
+        np.asarray(covariance_add_dom_raw, dtype=np.float64),
+    )
+    low = np.full(a.shape, np.nan)
+    high = np.full(a.shape, np.nan)
+    bounded = np.zeros(a.shape, dtype=bool)
+    qa = a * a - z * z * va
+    qb = -2.0 * a * d + 2.0 * z * z * cov
+    qc = d * d - z * z * vd
+    discriminant = qb * qb - 4.0 * qa * qc
+    valid = (
+        np.isfinite(qa)
+        & np.isfinite(qb)
+        & np.isfinite(qc)
+        & (qa > 0.0)
+        & (discriminant >= 0.0)
+    )
+    root = np.sqrt(np.maximum(discriminant, 0.0))
+    first = np.divide(-qb - root, 2.0 * qa, out=np.full(a.shape, np.nan), where=valid)
+    second = np.divide(-qb + root, 2.0 * qa, out=np.full(a.shape, np.nan), where=valid)
+    low[valid] = np.minimum(first[valid], second[valid])
+    high[valid] = np.maximum(first[valid], second[valid])
+    bounded[valid] = True
+    return low, high, bounded
+
+
 def classify_inheritance(beta_add_raw, beta_dom_raw, se_add_raw=None,
-                         thresholds=DEFAULT_THRESHOLDS, stability_z=1.0):
+                         thresholds=DEFAULT_THRESHOLDS, stability_z=3.0):
     """Return coarse and sign-aware inheritance labels.
 
     The allele suffix describes the homozygote toward which the heterozygote
     is displaced: ``A1`` for dosage 2 and ``A0`` for dosage 0.  Additive
-    effects indistinguishable from zero are labelled unstable because ``d/a``
-    is not interpretable there.
+    effects that do not exceed ``stability_z`` standard errors are labelled
+    unstable because ``d/a`` is not interpretable there. Labels are descriptive
+    annotations, not hypothesis tests.
     """
     a = np.asarray(beta_add_raw, dtype=np.float64)
     d = np.asarray(beta_dom_raw, dtype=np.float64)

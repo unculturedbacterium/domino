@@ -10,13 +10,12 @@ from dataclasses import replace
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, t as _t
 from threadpoolctl import threadpool_limits
 
-from ._utils import neglog10p
+from ._utils import neglog10_chi2, neglog10_t
 from .assoc import iter_chromosome_gls_eigen
 from .backend import resolve_backend_name
-from .classify import classify_inheritance
+from .classify import classify_inheritance, fieller_ratio_interval
 from .grm import iter_loco_grms
 from .io import PlinkReader
 from .output import AtomicParquetWriter
@@ -136,17 +135,11 @@ def _recover_multivariate_block(
     result["beta_additive_raw"] = beta_add_marginal.ravel(order="C")
     result["se_additive_raw"] = se_add_marginal.ravel(order="C")
     result["stat_additive"] = stat_add_marginal.ravel(order="C")
-    result["neglog_p_additive"] = neglog10p(
-        2.0 * _t.sf(np.abs(stat_add_marginal), df=df_additive)
+    result["neglog_p_additive"] = neglog10_t(
+        stat_add_marginal, df_additive
     ).ravel(order="C")
 
-    add_scale = np.divide(
-        matrix("beta_additive"),
-        beta_add_marginal_star,
-        out=np.full_like(beta_add_marginal_star, np.nan),
-        where=np.abs(beta_add_marginal_star) > np.finfo(float).eps,
-    )
-    marker_add_scale = np.nanmedian(add_scale, axis=1)
+    marker_add_scale = matrix("additive_sd")[:, 0]
     result["beta_additive"] = (
         beta_add_marginal * marker_add_scale[:, None]
     ).ravel(order="C")
@@ -158,6 +151,7 @@ def _recover_multivariate_block(
         "count_BB",
         "maf",
         "genotype_filter_pass",
+        "additive_sd",
     ]
     for column in invariant_columns:
         result[column] = np.repeat(base[column].to_numpy(), t)
@@ -171,9 +165,7 @@ def _recover_multivariate_block(
     )
     multi_statistics = {
         "stat_additive_multivariate": additive_multivariate,
-        "neglog_p_additive_multivariate": neglog10p(
-            chi2.sf(additive_multivariate, t)
-        ),
+        "neglog_p_additive_multivariate": neglog10_chi2(additive_multivariate, t),
         "df_additive_multivariate": np.full(m, t, dtype=float),
     }
 
@@ -187,9 +179,10 @@ def _recover_multivariate_block(
         result["beta_dominance_marginal_raw"] = beta_dom_marginal.ravel(order="C")
         result["se_dominance_marginal_raw"] = se_dom_marginal.ravel(order="C")
         result["stat_dominance_marginal"] = stat_dom_marginal.ravel(order="C")
-        result["neglog_p_dominance_marginal"] = neglog10p(
-            2.0 * _t.sf(np.abs(stat_dom_marginal), df=df_additive)
+        result["neglog_p_dominance_marginal"] = neglog10_t(
+            stat_dom_marginal, df_additive
         ).ravel(order="C")
+        result["dominance_sd"] = np.repeat(base["dominance_sd"].to_numpy(), t)
 
         add_star = matrix("beta_add_joint_raw")
         dom_star = matrix("beta_dom_joint_raw")
@@ -207,6 +200,13 @@ def _recover_multivariate_block(
         stat_dom = dom / se_dom
         df_joint = n_samples - fixed_rank - 2
         fstat = stat_dom * stat_dom
+        ci_low, ci_high, ci_bounded = fieller_ratio_interval(
+            add,
+            dom,
+            var_add,
+            var_dom,
+            covariance,
+        )
         signed, magnitude, coarse, mode = classify_inheritance(
             add,
             dom,
@@ -225,12 +225,15 @@ def _recover_multivariate_block(
             "cov_add_dom_joint_raw": covariance,
             "stat_add_joint": stat_add,
             "stat_dom_joint": stat_dom,
-            "neglog_p_add_joint": neglog10p(2.0 * _t.sf(np.abs(stat_add), df=df_joint)),
-            "neglog_p_dom_joint": neglog10p(2.0 * _t.sf(np.abs(stat_dom), df=df_joint)),
+            "neglog_p_add_joint": neglog10_t(stat_add, df_joint),
+            "neglog_p_dom_joint": neglog10_t(stat_dom, df_joint),
             "f_avsad": fstat,
-            "neglog_p_avsad": neglog10p(chi2.sf(fstat, 1)),
+            "neglog_p_avsad": neglog10_chi2(fstat, 1),
             "degree_of_dominance": signed,
             "degree_of_dominance_abs": magnitude,
+            "degree_of_dominance_ci_low": ci_low,
+            "degree_of_dominance_ci_high": ci_high,
+            "degree_of_dominance_ci_bounded": ci_bounded & valid,
             "dominance_class": coarse,
             "inheritance_mode": mode,
         }
@@ -252,19 +255,19 @@ def _recover_multivariate_block(
         multi_statistics.update(
             {
                 "stat_add_joint_multivariate": additive_joint_multivariate,
-                "neglog_p_add_joint_multivariate": neglog10p(
-                    chi2.sf(additive_joint_multivariate, t)
-                ),
+            "neglog_p_add_joint_multivariate": neglog10_chi2(
+                additive_joint_multivariate, t
+            ),
                 "df_add_joint_multivariate": np.full(m, t, dtype=float),
                 "stat_dom_joint_multivariate": dominance_joint_multivariate,
-                "neglog_p_dom_joint_multivariate": neglog10p(
-                    chi2.sf(dominance_joint_multivariate, t)
-                ),
+            "neglog_p_dom_joint_multivariate": neglog10_chi2(
+                dominance_joint_multivariate, t
+            ),
                 "df_dom_joint_multivariate": np.full(m, t, dtype=float),
                 "stat_add_dom_multivariate": add_dom_multivariate,
-                "neglog_p_add_dom_multivariate": neglog10p(
-                    chi2.sf(add_dom_multivariate, 2 * t)
-                ),
+            "neglog_p_add_dom_multivariate": neglog10_chi2(
+                add_dom_multivariate, 2 * t
+            ),
                 "df_add_dom_multivariate": np.full(m, 2 * t, dtype=float),
             }
         )
@@ -313,8 +316,9 @@ def run_gwas(
     y_correction="ystar",
     out=None,
     da_thresholds=(0.25, 0.75, 1.25),
-    min_genotype_count=0,
-    stability_z=1.0,
+    min_genotype_count=1,
+    stability_z=3.0,
+    joint_collinearity_tolerance=1e-6,
     per_trait_missing=True,
     grm_bfile=None,
     return_results=True,
@@ -341,7 +345,7 @@ def run_gwas(
 
     Defaults preserve independent-trait profile REML and exact float64
     arithmetic. Explicit ``decomposition='exact'`` always requests the
-    pairwise-missingness-aware dense LOCO GRM and is rejected during planning
+    positive-semidefinite mean-imputed dense LOCO GRM and is rejected during planning
     when it cannot fit the memory budget.
     """
     run_started = time.perf_counter()
@@ -376,6 +380,12 @@ def run_gwas(
         raise ValueError("multivariate trait_mode requires y_correction='ystar'")
     if not return_results and out is None:
         raise ValueError("out is required when return_results=False")
+    if min_genotype_count < 0:
+        raise ValueError("min_genotype_count must be non-negative")
+    if stability_z < 0:
+        raise ValueError("stability_z must be non-negative")
+    if not 0.0 < joint_collinearity_tolerance < 1.0:
+        raise ValueError("joint_collinearity_tolerance must be between 0 and 1")
 
     config = resource_config or ResourceConfig(
         memory_budget_mb=memory_budget_mb,
@@ -517,6 +527,9 @@ def run_gwas(
                     "traits": group_traits,
                     "n_samples": len(Y),
                     "fixed_effect_rank": C.shape[1],
+                    "complete_case_fraction": float(len(Y) / max(len(sub), 1)),
+                    "background_covariance": "additive_LOCO_plus_residual",
+                    "dominance_background_grm": False,
                     "plan": plan.as_dict(),
                     "chromosomes": {},
                 }
@@ -575,6 +588,23 @@ def run_gwas(
                     U = eigensystem["U"]
                     s = eigensystem["s"]
                     residual_eigenvalue = eigensystem.get("residual_eigenvalue", 0.0)
+                    diagnostic = eigensystem.get("diagnostics", {})
+                    related_fraction = diagnostic.get(
+                        "fraction_pairs_relatedness_gt_0_05", 0.0
+                    )
+                    if (
+                        model == "add-dom"
+                        and related_fraction > 0.01
+                        and not record.get("relatedness_warning_emitted", False)
+                    ):
+                        warnings.warn(
+                            "The LOCO GRM indicates a related cohort, but Domino's GWAS null "
+                            "covariance contains an additive GRM only. Conditional dominance "
+                            "hits should be confirmed with a model that includes a dominance "
+                            "background GRM.",
+                            RuntimeWarning,
+                        )
+                        record["relatedness_warning_emitted"] = True
                     variance_started = time.perf_counter()
                     transformed = None
                     if y_correction is None:
@@ -633,7 +663,10 @@ def run_gwas(
                         "fits": original_fits,
                         "boundary_h2_count": int(
                             sum(
-                                fit["h2"] <= 1e-8 or fit["h2"] >= 1.0 - 1e-8
+                                fit.get(
+                                    "at_boundary",
+                                    fit["h2"] <= 1e-8 or fit["h2"] >= 1.0 - 1e-8,
+                                )
                                 for fit in original_fits
                             )
                         ),
@@ -649,6 +682,7 @@ def run_gwas(
                             "genetic_max_eigenvalue": float(genetic_eigenvalues.max()),
                             "residual_min_eigenvalue": float(residual_eigenvalues.min()),
                             "residual_max_eigenvalue": float(residual_eigenvalues.max()),
+                            **transformed.get("trait_covariance_diagnostics", {}),
                         }
                         if len(group_traits) <= 50:
                             covariance_summary["genetic"] = genetic_covariance.tolist()
@@ -698,6 +732,7 @@ def run_gwas(
                         da_thresholds=da_thresholds,
                         min_genotype_count=min_genotype_count,
                         stability_z=stability_z,
+                        joint_collinearity_tolerance=joint_collinearity_tolerance,
                         residual_eigenvalue=residual_eigenvalue,
                         compute_dtype=compute_dtype,
                         combine_trait_tiles=True,
@@ -763,6 +798,13 @@ def run_gwas(
         "variance_estimator": resolved_estimator,
         "decomposition": decomposition,
         "compute_dtype": np.dtype(compute_dtype).name,
+        "statistical_config": {
+            "min_genotype_count": int(min_genotype_count),
+            "stability_z": float(stability_z),
+            "joint_collinearity_tolerance": float(joint_collinearity_tolerance),
+            "primary_dominance_test": "neglog_p_dom_joint",
+            "dominance_background_grm": False,
+        },
         "runtime_s": total_runtime_s,
         "target_runtime_hours": config.target_runtime_hours,
         "target_runtime_exceeded": (

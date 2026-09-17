@@ -19,7 +19,13 @@ from .vc import (
     blup_resid,
 )
 from .assoc import scan_chromosome, scan_chromosome_gls_eigen, iter_chromosome_gls_eigen
-from .classify import degree_of_dominance, classify_da, classify_inheritance, DEFAULT_THRESHOLDS
+from .classify import (
+    degree_of_dominance,
+    classify_da,
+    classify_inheritance,
+    fieller_ratio_interval,
+    DEFAULT_THRESHOLDS,
+)
 from .pipeline import run_gwas
 from .blup import calculate_blups, calculate_component_blups, run_blup, write_blups
 from .resources import ResourceConfig, ExecutionPlan, plan_execution
@@ -51,7 +57,7 @@ from .reporting import (
 from .plotting import additive_dominance_scatter, manhattan_plot, qq_plot, runtime_memory_plot
 from .reproducibility import collect_environment, public_api_table, write_manifest
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = [
     "run_gwas", "PlinkReader", "read_bim", "read_fam",
     "compute_loco_grms", "iter_loco_grms", "compute_grm",
@@ -71,5 +77,6 @@ __all__ = [
     "public_api_table", "write_manifest", "additive_dominance_scatter",
     "manhattan_plot", "qq_plot", "runtime_memory_plot",
     "degree_of_dominance", "classify_da", "classify_inheritance",
+    "fieller_ratio_interval",
     "DEFAULT_THRESHOLDS", "__version__",
 ]

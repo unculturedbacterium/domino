@@ -1,10 +1,10 @@
 """Additive genomic relatedness matrices with LOCO decomposition.
 
-Exact mode uses a pairwise-missingness-aware GRM definition, while
-yielding one chromosome eigensystem at a time.  Randomized mode never forms an
-``n x n`` GRM: it applies the mean-imputed standardized genotype operator in
-blocks, estimates a retained eigenspace, and represents omitted directions by
-a trace-matched bulk eigenvalue.
+Both exact and randomized modes use the positive-semidefinite mean-imputed
+GRM ``K = Z Z.T / M``. Exact mode yields one chromosome eigensystem at a time.
+Randomized mode never forms an ``n x n`` GRM: it applies the same genotype
+operator in blocks, estimates a retained eigenspace, and represents omitted
+directions by a trace-matched bulk eigenvalue.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import warnings
 
 import numpy as np
 from scipy.linalg import eigh
@@ -20,7 +21,7 @@ from sklearn.utils.extmath import randomized_svd
 
 from ._utils import standardize_block
 
-CACHE_FORMAT_VERSION = "domino-loco-v1"
+CACHE_FORMAT_VERSION = "domino-loco-v3-psd-polymorphic"
 
 
 def _eig(G, n_components=None, decomposition="exact", random_state=0):
@@ -34,13 +35,22 @@ def _eig(G, n_components=None, decomposition="exact", random_state=0):
         else:
             s, U = eigh(G, subset_by_index=(n - rank, n - 1), check_finite=False)
         order = np.argsort(s)[::-1]
-        return U[:, order], np.abs(s[order])
+        s = s[order]
+        scale = max(float(np.max(np.abs(s))), 1.0)
+        materially_negative = s < (-1e-8 * scale)
+        if np.any(materially_negative):
+            warnings.warn(
+                "GRM has materially negative eigenvalues; clipping them to zero. "
+                "This usually indicates corrupted input or severe numerical loss.",
+                RuntimeWarning,
+            )
+        return U[:, order], np.maximum(s, 0.0)
     if decomposition != "randomized":
         raise ValueError("decomposition must be 'exact' or 'randomized'")
     U, s, _ = randomized_svd(
         G, n_components=rank, random_state=random_state, flip_sign=True
     )
-    return U, np.abs(s)
+    return U, np.maximum(s, 0.0)
 
 
 def _resolve_decomposition(decomposition, n, n_components):
@@ -78,10 +88,7 @@ def _cache_key(
 ):
     digest = hashlib.sha256()
     digest.update(CACHE_FORMAT_VERSION.encode("ascii"))
-    normalization = (
-        "pairwise_observed_standardized" if decomposition == "exact"
-        else "mean_imputed_standardized_bulk"
-    )
+    normalization = "mean_imputed_standardized_global_variant_count"
     digest.update(normalization.encode("ascii"))
     for extension in ("bed", "bim", "fam"):
         path = Path(f"{reader.prefix}.{extension}").resolve()
@@ -170,8 +177,10 @@ def _iter_excluding_chrom(reader, chrom, sample_index, block_size, dtype):
         keep = bim_slice["chrom"].to_numpy() != str(chrom)
         if not np.any(keep):
             continue
-        z, _, _ = standardize_block(genotype[:, keep], dtype=dtype)
-        yield z
+        z, sd, _ = standardize_block(genotype[:, keep], dtype=dtype)
+        polymorphic = np.isfinite(sd)
+        if np.any(polymorphic):
+            yield z[:, polymorphic]
 
 
 def _apply_streamed_grm(reader, chrom, sample_index, block_size, X, dtype):
@@ -370,37 +379,65 @@ def iter_loco_grms(
         return
 
     missing = [chrom for chrom in run_chroms if cached[chrom] is None]
-    zzt_all = w_all = None
+    zzt_all = None
+    variant_count_all = 0
     if missing:
         zzt_all = np.zeros((n, n), dtype=dtype)
-        w_all = np.zeros((n, n), dtype=dtype)
         for _, genotype in reader.iter_blocks(block_size, sample_index=sidx):
-            z, _, mask = standardize_block(genotype, dtype=dtype)
-            zzt_all += z @ z.T
-            w_all += mask @ mask.T
+            z, sd, _ = standardize_block(genotype, dtype=dtype)
+            polymorphic = np.isfinite(sd)
+            if np.any(polymorphic):
+                z = z[:, polymorphic]
+                zzt_all += z @ z.T
+                variant_count_all += z.shape[1]
 
     for chrom in run_chroms:
         result = cached[chrom]
         idx_chrom = np.where(chrom_arr == chrom)[0]
         if result is None:
             zzt_chrom = np.zeros((n, n), dtype=dtype)
-            w_chrom = np.zeros((n, n), dtype=dtype)
+            variant_count_chrom = 0
             for _, genotype in reader.iter_blocks(
                 block_size, variant_index=idx_chrom, sample_index=sidx
             ):
-                z, _, mask = standardize_block(genotype, dtype=dtype)
-                zzt_chrom += z @ z.T
-                w_chrom += mask @ mask.T
+                z, sd, _ = standardize_block(genotype, dtype=dtype)
+                polymorphic = np.isfinite(sd)
+                if np.any(polymorphic):
+                    z = z[:, polymorphic]
+                    zzt_chrom += z @ z.T
+                    variant_count_chrom += z.shape[1]
+            variant_count = variant_count_all - variant_count_chrom
+            if variant_count <= 0:
+                raise ValueError(f"no variants remain after leaving out chromosome {chrom}")
             np.subtract(zzt_all, zzt_chrom, out=zzt_chrom)
-            np.subtract(w_all, w_chrom, out=w_chrom)
-            np.maximum(w_chrom, 1.0, out=w_chrom)
-            np.divide(zzt_chrom, w_chrom, out=zzt_chrom)
+            zzt_chrom /= variant_count
+            zzt_chrom = (zzt_chrom + zzt_chrom.T) * 0.5
+            offdiag_count = n * (n - 1)
+            offdiag_square_mean = (
+                float(np.sum(zzt_chrom * zzt_chrom, dtype=np.float64))
+                - float(np.sum(np.diag(zzt_chrom) ** 2, dtype=np.float64))
+            ) / max(offdiag_count, 1)
+            related_pairs = sum(
+                int(np.count_nonzero(zzt_chrom[row, row + 1 :] > 0.05))
+                for row in range(max(n - 1, 0))
+            )
+            pair_count = n * (n - 1) // 2
             U, s = _eig(zzt_chrom, n_components=rank, decomposition="exact")
             result = {
                 "U": U,
                 "s": s,
                 "residual_eigenvalue": 0.0,
-                "diagnostics": {"rank": int(rank), "variants_left_out": int(len(idx_chrom))},
+                "diagnostics": {
+                    "rank": int(rank),
+                    "variants_left_out": int(len(idx_chrom)),
+                    "polymorphic_variants_left_out": int(variant_count_chrom),
+                    "variants_in_loco_grm": int(variant_count),
+                    "grm_normalization": "mean_imputed_ZZT_over_M",
+                    "mean_squared_offdiagonal_relatedness": offdiag_square_mean,
+                    "fraction_pairs_relatedness_gt_0_05": (
+                        float(related_pairs / pair_count) if pair_count else 0.0
+                    ),
+                },
                 "cache_hit": False,
                 "decomposition": "exact",
                 "cache_key": key,
@@ -421,7 +458,7 @@ def compute_loco_grms(reader, **kwargs):
 
 
 def compute_grm(reader, sample_index=None, block_size=8192, compute_dtype="float64"):
-    """Genome-wide additive GRM (dense, pairwise missingness aware)."""
+    """Genome-wide PSD additive GRM using mean-imputed ``Z Z.T / M``."""
     sidx = (
         np.arange(reader.n_samples, dtype=np.int64)
         if sample_index is None
@@ -430,9 +467,15 @@ def compute_grm(reader, sample_index=None, block_size=8192, compute_dtype="float
     dtype = np.dtype(compute_dtype)
     n = len(sidx)
     zzt = np.zeros((n, n), dtype=dtype)
-    counts = np.zeros((n, n), dtype=dtype)
+    variant_count = 0
     for _, genotype in reader.iter_blocks(block_size, sample_index=sidx):
-        z, _, mask = standardize_block(genotype, dtype=dtype)
-        zzt += z @ z.T
-        counts += mask @ mask.T
-    return zzt / np.maximum(counts, 1.0)
+        z, sd, _ = standardize_block(genotype, dtype=dtype)
+        polymorphic = np.isfinite(sd)
+        if np.any(polymorphic):
+            z = z[:, polymorphic]
+            zzt += z @ z.T
+            variant_count += z.shape[1]
+    if variant_count == 0:
+        raise ValueError("cannot compute a GRM without variants")
+    result = zzt / variant_count
+    return (result + result.T) * 0.5

@@ -16,6 +16,7 @@ DEFAULT_P_COLUMNS = {
     "add_vs_add_dom": "neglog_p_avsad",
     "add_dom_multivariate": "neglog_p_add_dom_multivariate",
 }
+PRIMARY_TESTS = ("additive", "add_joint", "dom_joint", "add_vs_add_dom")
 
 
 def neglog10_to_p(values):
@@ -51,7 +52,11 @@ def bonferroni_threshold(n_tests: int, alpha: float = 0.05, neglog10: bool = Tru
 
 def _available_tests(frame: pd.DataFrame, tests: Optional[Sequence[str]] = None) -> dict:
     if tests is None:
-        return {name: column for name, column in DEFAULT_P_COLUMNS.items() if column in frame.columns}
+        return {
+            name: DEFAULT_P_COLUMNS[name]
+            for name in PRIMARY_TESTS
+            if DEFAULT_P_COLUMNS[name] in frame.columns
+        }
     result = {}
     for name in tests:
         column = DEFAULT_P_COLUMNS.get(name, name)

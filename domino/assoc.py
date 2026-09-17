@@ -17,11 +17,20 @@ degree of dominance is a genuine d/a rather than a ratio of standardized stats.
 """
 import numpy as np
 import pandas as pd
-from scipy.stats import t as _t, f as _f
 
-from ._utils import standardize_block, dominance_encode, neglog10p
+from ._utils import (
+    standardize_block,
+    dominance_encode,
+    neglog10_t,
+    neglog10_f,
+)
 from .backend import create_projection_backend
-from .classify import degree_of_dominance, classify_da, classify_inheritance
+from .classify import (
+    degree_of_dominance,
+    classify_da,
+    classify_inheritance,
+    fieller_ratio_interval,
+)
 
 
 def _regress_single(Xz, Y, Xmask, Ymask, center=True):
@@ -37,8 +46,7 @@ def _regress_single(Xz, Y, Xmask, Ymask, center=True):
     ssr = ssr - beta * beta * diag
     se = np.sqrt(ssr / (df * diag))
     stat = beta / se
-    p = 2.0 * _t.sf(np.abs(stat), df=df)
-    return beta, se, stat, neglog10p(p), df
+    return beta, se, stat, neglog10_t(stat, df), df
 
 
 def _regress_joint(Az, Dz, Y, mask, Ymask, center=True):
@@ -67,22 +75,18 @@ def _regress_joint(Az, Dz, Y, mask, Ymask, center=True):
     se_dom = np.sqrt(sig2 * inv22)
     stat_add = b_add / se_add
     stat_dom = b_dom / se_dom
-    p_add = 2.0 * _t.sf(np.abs(stat_add), df=df_j)
-    p_dom = 2.0 * _t.sf(np.abs(stat_dom), df=df_j)
 
     # additive-only residual SS (for the F test) via the marginal additive fit
     b_a, se_a, _, _, df_a = _regress_single(Az, Y, mask, Ymask, center=center)
     rss_add = (se_a ** 2) * df_a * np.where(np.isnan(s11), np.nan, s11)
     num = np.where(rss_add - rss_ad < 0, 0.0, rss_add - rss_ad)
     fstat = num / np.where(df_j > 0, rss_ad / df_j, np.nan)
-    p_avsad = _f.sf(fstat, 1, df_j)
-
     return {
         "beta_add_joint": b_add, "se_add_joint": se_add,
-        "stat_add_joint": stat_add, "neglog_p_add_joint": neglog10p(p_add),
+        "stat_add_joint": stat_add, "neglog_p_add_joint": neglog10_t(stat_add, df_j),
         "beta_dom_joint": b_dom, "se_dom_joint": se_dom,
-        "stat_dom_joint": stat_dom, "neglog_p_dom_joint": neglog10p(p_dom),
-        "f_avsad": fstat, "neglog_p_avsad": neglog10p(p_avsad),
+        "stat_dom_joint": stat_dom, "neglog_p_dom_joint": neglog10_t(stat_dom, df_j),
+        "f_avsad": fstat, "neglog_p_avsad": neglog10_f(fstat, 1, df_j),
         "df_joint": df_j,
     }
 
@@ -157,7 +161,8 @@ def _residualize_matrix(x, design, information_inverse):
 def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
                         whitening_matrices, fixed_designs, block_size=8192,
                         model="add-dom", da_thresholds=(0.25, 0.75, 1.25),
-                        min_genotype_count=0, stability_z=1.0):
+                        min_genotype_count=5, stability_z=3.0,
+                        joint_collinearity_tolerance=1e-6):
     """Exact GLS scan after transforming every column of the complete design.
 
     Missing genotype calls are mean-imputed within a variant after recording
@@ -207,7 +212,10 @@ def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
             "stat_dominance_marginal", "neglog_p_add_joint",
             "neglog_p_dom_joint", "neglog_p_avsad", "f_avsad",
             "beta_add_joint_raw", "se_add_joint_raw", "beta_dom_joint_raw",
+            "se_dom_joint_raw", "cov_add_dom_joint_raw",
             "degree_of_dominance", "degree_of_dominance_abs",
+            "degree_of_dominance_ci_low", "degree_of_dominance_ci_high",
+            "joint_design_determinant_ratio",
         ]
         metrics = {name: np.full((m, n_traits), np.nan) for name in metric_names}
         metrics.update({
@@ -217,6 +225,7 @@ def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
             "count_BB": np.repeat(count_bb[:, None], n_traits, axis=1),
             "maf": np.repeat(maf[:, None], n_traits, axis=1),
             "genotype_filter_pass": np.repeat(eligible[:, None], n_traits, axis=1),
+            "degree_of_dominance_ci_bounded": np.zeros((m, n_traits), dtype=bool),
             "dominance_class": np.full((m, n_traits), "FILTERED", dtype=object),
             "inheritance_mode": np.full((m, n_traits), "FILTERED", dtype=object),
         })
@@ -231,11 +240,10 @@ def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
             rss_a = yty - b_add_m * x1ty
             se_add_m = np.sqrt(np.divide(rss_a, df_a * s11, out=np.full(m, np.nan), where=valid_a))
             stat_add_m = b_add_m / se_add_m
-            p_add_m = 2.0 * _t.sf(np.abs(stat_add_m), df=df_a)
             metrics["beta_additive"][:, j] = b_add_m
             metrics["beta_additive_raw"][:, j] = b_add_m / add_sd
             metrics["stat_additive"][:, j] = stat_add_m
-            metrics["neglog_p_additive"][:, j] = neglog10p(p_add_m)
+            metrics["neglog_p_additive"][:, j] = neglog10_t(stat_add_m, df_a)
 
             if model == "additive":
                 metrics["genotype_filter_pass"][:, j] = valid_a
@@ -252,14 +260,18 @@ def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
             se_dom_m = np.sqrt(np.divide(rss_d, df_a * s22, out=np.full(m, np.nan), where=valid_d))
             stat_dom_m = b_dom_m / se_dom_m
             metrics["stat_dominance_marginal"][:, j] = stat_dom_m
-            metrics["neglog_p_dominance_marginal"][:, j] = neglog10p(
-                2.0 * _t.sf(np.abs(stat_dom_m), df=df_a)
-            )
+            metrics["neglog_p_dominance_marginal"][:, j] = neglog10_t(stat_dom_m, df_a)
 
             s12 = np.sum(A * D, axis=0)
             det = s11 * s22 - s12 * s12
+            det_ratio = np.divide(
+                det,
+                s11 * s22,
+                out=np.full(m, np.nan),
+                where=(s11 > 0) & (s22 > 0),
+            )
             df_j = n - rank_c - 2
-            valid = eligible & (det > np.finfo(float).eps) & (df_j > 0)
+            valid = eligible & (det_ratio > joint_collinearity_tolerance) & (df_j > 0)
             metrics["genotype_filter_pass"][:, j] = valid
             inv11 = np.divide(s22, det, out=np.full(m, np.nan), where=valid)
             inv22 = np.divide(s11, det, out=np.full(m, np.nan), where=valid)
@@ -277,20 +289,35 @@ def scan_chromosome_gls(reader, chrom, phenotypes, trait_names, sample_index,
             a_raw = b_add / add_sd
             se_a_raw = se_add / add_sd
             d_raw = b_dom / dom_sd
+            se_d_raw = se_dom / dom_sd
+            cov_raw = sigma2 * inv12 / (add_sd * dom_sd)
+            ci_low, ci_high, ci_bounded = fieller_ratio_interval(
+                a_raw,
+                d_raw,
+                se_a_raw * se_a_raw,
+                se_d_raw * se_d_raw,
+                cov_raw,
+            )
             signed, magnitude, coarse, mode = classify_inheritance(
                 a_raw, d_raw, se_a_raw, thresholds=da_thresholds, stability_z=stability_z
             )
             coarse[~valid] = "FILTERED"
             mode[~valid] = "FILTERED"
-            metrics["neglog_p_add_joint"][:, j] = neglog10p(2.0 * _t.sf(np.abs(stat_add), df=df_j))
-            metrics["neglog_p_dom_joint"][:, j] = neglog10p(2.0 * _t.sf(np.abs(stat_dom), df=df_j))
-            metrics["neglog_p_avsad"][:, j] = neglog10p(_f.sf(fstat, 1, df_j))
+            metrics["neglog_p_add_joint"][:, j] = neglog10_t(stat_add, df_j)
+            metrics["neglog_p_dom_joint"][:, j] = neglog10_t(stat_dom, df_j)
+            metrics["neglog_p_avsad"][:, j] = neglog10_f(fstat, 1, df_j)
             metrics["f_avsad"][:, j] = fstat
             metrics["beta_add_joint_raw"][:, j] = a_raw
             metrics["se_add_joint_raw"][:, j] = se_a_raw
             metrics["beta_dom_joint_raw"][:, j] = d_raw
+            metrics["se_dom_joint_raw"][:, j] = se_d_raw
+            metrics["cov_add_dom_joint_raw"][:, j] = cov_raw
             metrics["degree_of_dominance"][:, j] = signed
             metrics["degree_of_dominance_abs"][:, j] = magnitude
+            metrics["degree_of_dominance_ci_low"][:, j] = ci_low
+            metrics["degree_of_dominance_ci_high"][:, j] = ci_high
+            metrics["degree_of_dominance_ci_bounded"][:, j] = ci_bounded & valid
+            metrics["joint_design_determinant_ratio"][:, j] = det_ratio
             metrics["dominance_class"][:, j] = coarse
             metrics["inheritance_mode"][:, j] = mode
 
@@ -431,6 +458,11 @@ def _empty_eigen_metrics(m, n_traits, observed, counts, maf, eligible, model):
                 "cov_add_dom_joint_raw",
                 "degree_of_dominance",
                 "degree_of_dominance_abs",
+                "degree_of_dominance_ci_low",
+                "degree_of_dominance_ci_high",
+                "joint_design_determinant_ratio",
+                "additive_sd",
+                "dominance_sd",
             ]
         )
     metrics = {name: np.full((m, n_traits), np.nan) for name in numeric}
@@ -442,6 +474,7 @@ def _empty_eigen_metrics(m, n_traits, observed, counts, maf, eligible, model):
             "count_BB": np.repeat(counts[2][:, None], n_traits, axis=1),
             "maf": np.repeat(maf[:, None], n_traits, axis=1),
             "genotype_filter_pass": np.repeat(eligible[:, None], n_traits, axis=1),
+            "degree_of_dominance_ci_bounded": np.zeros((m, n_traits), dtype=bool),
             "dominance_class": np.full((m, n_traits), "FILTERED", dtype=object),
             "inheritance_mode": np.full((m, n_traits), "FILTERED", dtype=object),
         }
@@ -463,8 +496,9 @@ def iter_chromosome_gls_eigen(
     trait_tile_size=None,
     model="add-dom",
     da_thresholds=(0.25, 0.75, 1.25),
-    min_genotype_count=0,
-    stability_z=1.0,
+    min_genotype_count=1,
+    stability_z=3.0,
+    joint_collinearity_tolerance=1e-6,
     residual_eigenvalue=0.0,
     compute_dtype="float64",
     combine_trait_tiles=False,
@@ -552,6 +586,9 @@ def iter_chromosome_gls_eigen(
                 eligible,
                 model,
             )
+            metrics["additive_sd"] = np.repeat(add_sd[:, None], q, axis=1)
+            if model == "add-dom":
+                metrics["dominance_sd"] = np.repeat(dom_sd[:, None], q, axis=1)
             x1ty, s11, AWC = _marker_terms(
                 add_z,
                 UTA,
@@ -581,9 +618,7 @@ def iter_chromosome_gls_eigen(
             metrics["beta_additive_raw"] = beta_additive / add_sd[:, None]
             metrics["se_additive_raw"] = se_additive / add_sd[:, None]
             metrics["stat_additive"] = stat_additive
-            metrics["neglog_p_additive"] = neglog10p(
-                2.0 * _t.sf(np.abs(stat_additive), df=df_additive)
-            )
+            metrics["neglog_p_additive"] = neglog10_t(stat_additive, df_additive)
 
             if model == "additive":
                 metrics["genotype_filter_pass"] = valid_additive
@@ -622,18 +657,24 @@ def iter_chromosome_gls_eigen(
             metrics["beta_dominance_marginal_raw"] = beta_dom_marginal / dom_sd[:, None]
             metrics["se_dominance_marginal_raw"] = se_dom_marginal / dom_sd[:, None]
             metrics["stat_dominance_marginal"] = stat_dom_marginal
-            metrics["neglog_p_dominance_marginal"] = neglog10p(
-                2.0 * _t.sf(np.abs(stat_dom_marginal), df=df_additive)
+            metrics["neglog_p_dominance_marginal"] = neglog10_t(
+                stat_dom_marginal, df_additive
             )
 
             s12 = _cross_marker_terms(
                 UTA, UTD, raw_ATD, AWC, DWC, context, trait_slice
             )
             determinant = s11 * s22 - s12 * s12
+            determinant_ratio = np.divide(
+                determinant,
+                s11 * s22,
+                out=np.full_like(determinant, np.nan),
+                where=(s11 > 0.0) & (s22 > 0.0),
+            )
             df_joint = n - context["rank_c"] - 2
             valid_joint = (
                 eligible[:, None]
-                & (determinant > np.finfo(float).eps)
+                & (determinant_ratio > joint_collinearity_tolerance)
                 & (df_joint > 0)
             )
             inv11 = np.divide(
@@ -678,6 +719,13 @@ def iter_chromosome_gls_eigen(
             dom_raw = beta_dom_joint / dom_sd[:, None]
             dom_se_raw = se_dom_joint / dom_sd[:, None]
             covariance_raw = sigma2 * inv12 / (add_sd[:, None] * dom_sd[:, None])
+            ci_low, ci_high, ci_bounded = fieller_ratio_interval(
+                add_raw,
+                dom_raw,
+                add_se_raw * add_se_raw,
+                dom_se_raw * dom_se_raw,
+                covariance_raw,
+            )
             signed, magnitude, coarse, mode = classify_inheritance(
                 add_raw,
                 dom_raw,
@@ -688,13 +736,9 @@ def iter_chromosome_gls_eigen(
             coarse[~valid_joint] = "FILTERED"
             mode[~valid_joint] = "FILTERED"
             metrics["genotype_filter_pass"] = valid_joint
-            metrics["neglog_p_add_joint"] = neglog10p(
-                2.0 * _t.sf(np.abs(stat_add_joint), df=df_joint)
-            )
+            metrics["neglog_p_add_joint"] = neglog10_t(stat_add_joint, df_joint)
             metrics["stat_add_joint"] = stat_add_joint
-            dominance_joint_score = neglog10p(
-                2.0 * _t.sf(np.abs(stat_dom_joint), df=df_joint)
-            )
+            dominance_joint_score = neglog10_t(stat_dom_joint, df_joint)
             metrics["neglog_p_dom_joint"] = dominance_joint_score
             metrics["stat_dom_joint"] = stat_dom_joint
             metrics["neglog_p_avsad"] = dominance_joint_score
@@ -706,6 +750,10 @@ def iter_chromosome_gls_eigen(
             metrics["cov_add_dom_joint_raw"] = covariance_raw
             metrics["degree_of_dominance"] = signed
             metrics["degree_of_dominance_abs"] = magnitude
+            metrics["degree_of_dominance_ci_low"] = ci_low
+            metrics["degree_of_dominance_ci_high"] = ci_high
+            metrics["degree_of_dominance_ci_bounded"] = ci_bounded & valid_joint
+            metrics["joint_design_determinant_ratio"] = determinant_ratio
             metrics["dominance_class"] = coarse
             metrics["inheritance_mode"] = mode
             frame = _assemble(metrics, bim_slice, tile_traits)

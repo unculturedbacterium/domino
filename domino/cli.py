@@ -59,6 +59,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scratch-dir", help="Scratch directory recorded in the execution plan")
     parser.add_argument("--target-runtime-hours", type=float)
     parser.add_argument("--min-genotype-count", type=int, default=5)
+    parser.add_argument(
+        "--stability-z",
+        type=float,
+        default=3.0,
+        help="Minimum |additive effect|/SE required for a finite d/a classification",
+    )
+    parser.add_argument(
+        "--joint-collinearity-tolerance",
+        type=float,
+        default=1e-6,
+        help="Minimum 1-r^2 condition metric for the joint additive/dominance design",
+    )
     parser.add_argument("--complete-case-across-traits", action="store_true")
     parser.add_argument("--stream", action="store_true", help="Write row groups without retaining results")
     parser.add_argument("--out", required=True, type=Path, help="Output prefix")
@@ -96,6 +108,8 @@ def main() -> None:
         chroms=_names(args.chromosomes) or None,
         block_size=args.block_size,
         min_genotype_count=args.min_genotype_count,
+        stability_z=args.stability_z,
+        joint_collinearity_tolerance=args.joint_collinearity_tolerance,
         per_trait_missing=not args.complete_case_across_traits,
         grm_bfile=args.grm_bfile,
         out=str(args.out),
@@ -150,6 +164,8 @@ def main() -> None:
         "gpu_devices": _integers(args.gpu_devices),
         "gpu_memory_budget_mb": args.gpu_memory_budget_mb,
         "min_genotype_count": args.min_genotype_count,
+        "stability_z": args.stability_z,
+        "joint_collinearity_tolerance": args.joint_collinearity_tolerance,
         "per_trait_missingness": not args.complete_case_across_traits,
         "streamed_output": args.stream,
         "trait_type": "quantitative_only",

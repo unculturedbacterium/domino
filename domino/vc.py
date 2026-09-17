@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 import numpy as np
 from scipy.linalg import eigh
@@ -150,9 +151,15 @@ class ProfileREMLContext:
 
     def fit(self):
         result = minimize_scalar(
-            self.objective, bounds=(1e-4, 1.0 - 1e-4), method="bounded"
+            self.objective, bounds=(0.0, 1.0), method="bounded"
         )
-        h2 = float(result.x)
+        candidates = np.asarray([0.0, float(result.x), 1.0], dtype=np.float64)
+        objectives = np.asarray([self.objective(value) for value in candidates])
+        finite = np.isfinite(objectives)
+        if not finite.any():
+            raise np.linalg.LinAlgError("profile variance-component objective is non-finite")
+        best = int(np.nanargmin(np.where(finite, objectives, np.nan)))
+        h2 = float(candidates[best])
         _, _, ywy, cwy, cwc = self.products(h2)
         beta = np.linalg.solve(cwc, cwy)
         sigma2 = max(float(ywy - cwy @ beta) / self.df, self.tol)
@@ -160,9 +167,10 @@ class ProfileREMLContext:
             "h2": h2,
             "yvar": sigma2,
             "converged": bool(result.success),
-            "objective": float(result.fun),
+            "objective": float(objectives[best]),
             "n_evaluations": int(self.n_evaluations),
             "estimator": f"profile_{self.method.lower()}",
+            "at_boundary": bool(h2 == 0.0 or h2 == 1.0),
         }
 
 
@@ -345,6 +353,16 @@ def multivariate_score_transform(
     Y, U, s, covar=None, residual_eigenvalue=0.0, tol=1e-10
 ):
     """Diagonalize SCORE genetic/residual trait covariance components."""
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim == 1:
+        Y = Y[:, None]
+    n, n_traits = Y.shape
+    if n_traits > max(n // 10, 1):
+        warnings.warn(
+            "multivariate SCORE has more than n/10 traits; covariance estimation and "
+            "joint Wald tests may be unstable. Use a smaller, prespecified trait set.",
+            RuntimeWarning,
+        )
     score = score_variance_components(
         Y,
         U,
@@ -359,6 +377,11 @@ def multivariate_score_transform(
     original_fits = score["fits"]
     scale = max(float(np.trace(residual)) / max(len(residual), 1), 1.0)
     residual_regularized = residual + np.eye(len(residual)) * (tol * scale)
+    residual_eigenvalues = np.linalg.eigvalsh(residual)
+    residual_condition = float(
+        np.max(residual_eigenvalues)
+        / max(float(np.min(residual_eigenvalues)), np.finfo(float).tiny)
+    )
     eigenvalues, transform = eigh(genetic, residual_regularized, check_finite=False)
     eigenvalues = np.maximum(eigenvalues, 0.0)
     inverse_transform = np.linalg.inv(transform)
@@ -380,6 +403,12 @@ def multivariate_score_transform(
         "transform": transform,
         "inverse_transform": inverse_transform,
         "generalized_eigenvalues": eigenvalues,
+        "trait_covariance_diagnostics": {
+            "n_samples": int(n),
+            "n_traits": int(n_traits),
+            "residual_condition_number": residual_condition,
+            "residual_min_eigenvalue": float(np.min(residual_eigenvalues)),
+        },
         "original_fits": original_fits,
         "fits": fits,
     }
